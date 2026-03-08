@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>TaxiHub - Book a Ride</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+    <style>
+        /* (Styles are identical to previous English theme for brevity) */
+        /* Full CSS omitted here for brevity; using same styling as original app */
+        *{box-sizing:border-box}
+        html,body{height:100%;margin:0;font-family:Segoe UI, Tahoma, Geneva, Verdana, sans-serif}
+        #map{height:100vh;width:100%}
+        .booking-panel{position:fixed;left:0;right:0;bottom:0;background:#fff;border-radius:20px;padding:18px;box-shadow:0 10px 30px rgba(0,0,0,.12);z-index:200}
+        .vehicle-types{display:flex;gap:8px}
+        .vehicle-option{flex:1;padding:12px;border-radius:10px;border:1px solid #e6e6e6;text-align:center;cursor:pointer}
+        .vehicle-option.selected{background:linear-gradient(135deg,#ff6b35,#ff8c5a);color:#fff;border-color:#ff6b35}
+        .btn{padding:12px;border-radius:10px;border:none;cursor:pointer}
+        .btn-primary{background:#ff6b35;color:#fff;width:100%}
+        .btn-secondary{background:#f1f1f1;width:100%}
+        .modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);align-items:center;justify-content:center}
+        .modal.active{display:flex}
+        .modal-content{background:#fff;padding:20px;border-radius:12px;max-width:420px;width:92%}
+    </style>
+</head>
+<body>
+<div id="map"></div>
+<div class="booking-panel">
+    <div style="margin-bottom:10px">
+        <label for="pickupInput">Pickup Location</label>
+        <input id="pickupInput" class="input-field" placeholder="Enter pickup location" style="width:100%;padding:10px;border-radius:8px;border:1px solid #ddd">
+    </div>
+    <div style="margin-bottom:10px">
+        <label for="dropInput">Drop Location</label>
+        <input id="dropInput" class="input-field" placeholder="Enter drop location" style="width:100%;padding:10px;border-radius:8px;border:1px solid #ddd">
+    </div>
+    <div style="margin-bottom:12px">
+        <label>Vehicle Type</label>
+        <div class="vehicle-types">
+            <div class="vehicle-option selected" data-type="mini">Mini<br><small>₹12/km</small></div>
+            <div class="vehicle-option" data-type="sedan">Sedan<br><small>₹15/km</small></div>
+            <div class="vehicle-option" data-type="suv">SUV<br><small>₹20/km</small></div>
+        </div>
+    </div>
+    <div id="fareBreakdown" style="margin-bottom:12px;display:none">
+        <div>Distance: <span id="distanceDisplay">0 km</span></div>
+        <div>Time Estimate: <span id="timeEstimate">0 min</span></div>
+        <div>Base Fare: <span id="baseFare">₹50</span></div>
+        <div>Total Fare: <span id="totalFare">₹50</span></div>
+    </div>
+    <button class="btn btn-primary" id="bookRideBtn">Book a Ride</button>
+</div>
+
+<div class="modal" id="confirmationModal"><div class="modal-content"><h3>Confirm Booking</h3><p id="bookingDetails"></p><div style="display:flex;gap:10px;margin-top:12px"><button id="confirmBookingBtn" class="btn btn-primary">Confirm</button><button id="cancelBookingBtn" class="btn btn-secondary">Cancel</button></div></div></div>
+<div class="modal" id="errorModal"><div class="modal-content"><h3>Error</h3><p id="errorMsg"></p><button onclick="closeModal('errorModal')" class="btn btn-secondary">Close</button></div></div>
+
+<!-- Full-screen confirmation screen shown after user confirms booking -->
+<div id="confirmedScreen" style="display:none;position:fixed;inset:0;background:#fff;z-index:5000;overflow:auto;padding:28px;">
+  <div style="max-width:900px;margin:24px auto;background:#fff;border-radius:12px;padding:22px;box-shadow:0 10px 40px rgba(0,0,0,0.12)">
+    <h2 style="margin-top:0;color:#111">Booking Confirmed</h2>
+    <p style="color:#555">Your ride has been confirmed. Details below:</p>
+    <div style="margin-top:12px;line-height:1.6;color:#222">
+      <div><strong>Pickup:</strong> <span id="confirmPickup">—</span></div>
+      <div><strong>Drop:</strong> <span id="confirmDrop">—</span></div>
+      <div><strong>Distance:</strong> <span id="confirmDistance">0 km</span></div>
+      <div><strong>Estimated Time:</strong> <span id="confirmETA">0 min</span></div>
+      <div><strong>Vehicle:</strong> <span id="confirmVehicle">—</span></div>
+      <div><strong>Fare:</strong> <span id="confirmFare">₹0</span></div>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:18px;">
+      <button id="closeConfirmedBtn" class="btn btn-primary">Back to Map</button>
+      <button id="viewTrackingBtn" class="btn btn-secondary">Track Driver</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+// This English file includes a geocoding fallback: if user types locations without selecting suggestions,
+// the app will call Nominatim to resolve the typed address to coordinates before booking.
+
+const AppState = { selectedVehicle:'mini', pickupLocation:null, dropLocation:null, pickupCoords:null, dropCoords:null };
+const vehiclePricing = { mini:{basePrice:50,perKm:12}, sedan:{basePrice:75,perKm:15}, suv:{basePrice:100,perKm:20} };
+const sampleLocations = [
+  {name:'Gateway of India',lat:18.9220,lng:72.8347},
+  {name:'Indira Gandhi Airport',lat:28.5562,lng:77.1000},
+  {name:'Bangalore City Station',lat:12.9716,lng:77.5946}
+];
+
+let map, pickupMarker, dropMarker, routeLine;
+function initMap(){ map = L.map('map').setView([20.5937,78.9629],5); L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19}).addTo(map); }
+initMap();
+
+// Resize map to fit viewport minus booking panel height
+function resizeMap() {
+  try {
+    const panel = document.querySelector('.booking-panel');
+    const mapEl = document.getElementById('map');
+    if (!panel || !mapEl) return;
+    const panelHeight = panel.offsetHeight;
+    // Set map height so it doesn't get obscured by the booking panel
+    mapEl.style.height = `calc(100vh - ${panelHeight}px)`;
+    if (map && typeof map.invalidateSize === 'function') {
+      setTimeout(() => map.invalidateSize(), 200);
+    }
+  } catch (e) { console.warn('resizeMap error', e); }
+}
+
+// Ensure map is sized correctly on load and when window resizes
+window.addEventListener('load', resizeMap);
+window.addEventListener('resize', resizeMap);
+
+// Helper: geocode via Nominatim
+async function geocodePlace(query){
+  try{
+    const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q='+encodeURIComponent(query);
+    const res = await fetch(url, { headers:{ 'Accept':'application/json' } });
+    const data = await res.json();
+    if(data && data.length) return { name: data[0].display_name, lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
+  }catch(e){console.warn('Geocode failed',e)}
+  return null;
+}
+
+// Calculate distance (km)
+function calculateDistance(lat1,lon1,lat2,lon2){
+  const R=6371;const dLat=(lat2-lat1)*Math.PI/180;const dLon=(lon2-lon1)*Math.PI/180;const a=Math.sin(dLat/2)*Math.sin(dLat/2)+Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)*Math.sin(dLon/2);const c=2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));return R*c;}
+
+function updateMarkers(){ if(pickupMarker){map.removeLayer(pickupMarker);} if(dropMarker){map.removeLayer(dropMarker);} if(AppState.pickupCoords) pickupMarker=L.marker([AppState.pickupCoords.lat,AppState.pickupCoords.lng]).addTo(map); if(AppState.dropCoords) dropMarker=L.marker([AppState.dropCoords.lat,AppState.dropCoords.lng]).addTo(map); if(routeLine) map.removeLayer(routeLine); if(AppState.pickupCoords && AppState.dropCoords){ routeLine=L.polyline([[AppState.pickupCoords.lat,AppState.pickupCoords.lng],[AppState.dropCoords.lat,AppState.dropCoords.lng]],{color:'#ff6b35'}).addTo(map); map.fitBounds(routeLine.getBounds(),{padding:[80,80]}); }
+}
+
+// Try to resolve typed inputs to locations if not already selected
+async function ensureLocationsResolved(){
+  const pickupVal = document.getElementById('pickupInput').value.trim();
+  const dropVal = document.getElementById('dropInput').value.trim();
+
+  if(!pickupVal || !dropVal) return { ok:false, reason:'Please enter both pickup and drop locations.' };
+
+  if(!AppState.pickupLocation){
+    // try to match sampleLocations by name
+    const match = sampleLocations.find(s=>s.name.toLowerCase()===pickupVal.toLowerCase());
+    if(match){ AppState.pickupLocation=match; AppState.pickupCoords={lat:match.lat,lng:match.lng}; }
+    else {
+      const geo = await geocodePlace(pickupVal);
+      if(geo){ AppState.pickupLocation={name:geo.name}; AppState.pickupCoords={lat:geo.lat,lng:geo.lng}; }
+    }
+  }
+
+  if(!AppState.dropLocation){
+    const match = sampleLocations.find(s=>s.name.toLowerCase()===dropVal.toLowerCase());
+    if(match){ AppState.dropLocation=match; AppState.dropCoords={lat:match.lat,lng:match.lng}; }
+    else {
+      const geo = await geocodePlace(dropVal);
+      if(geo){ AppState.dropLocation={name:geo.name}; AppState.dropCoords={lat:geo.lat,lng:geo.lng}; }
+    }
+  }
+
+  if(AppState.pickupCoords && AppState.dropCoords) return { ok:true };
+  return { ok:false, reason:'Could not resolve one or both locations to coordinates. Try a different address or use one of the suggestions.' };
+}
+
+async function handleBookRide(){
+  // Attempt to resolve typed locations to coordinates before validating
+  const res = await ensureLocationsResolved();
+  if(!res.ok){ showError(res.reason); return; }
+
+  // Proceed to calculate fare
+  const distance = calculateDistance(AppState.pickupCoords.lat,AppState.pickupCoords.lng,AppState.dropCoords.lat,AppState.dropCoords.lng);
+  const pricing = vehiclePricing[AppState.selectedVehicle];
+  const totalFare = Math.round(pricing.basePrice + distance*pricing.perKm);
+  // save last-calculated values for confirmation screen and later use
+  AppState.lastDistance = distance;
+  AppState.lastFare = totalFare;
+  document.getElementById('distanceDisplay').textContent = distance.toFixed(1)+' km';
+  document.getElementById('timeEstimate').textContent = Math.ceil(distance*2.5)+' min';
+  document.getElementById('baseFare').textContent = '₹'+pricing.basePrice;
+  document.getElementById('totalFare').textContent = '₹'+totalFare;
+  document.getElementById('fareBreakdown').style.display='block';
+
+  // persist booking details and navigate to the standalone confirmation page
+  const bookingPayload = {
+    pickup: AppState.pickupLocation && AppState.pickupLocation.name ? AppState.pickupLocation.name : document.getElementById('pickupInput').value,
+    drop: AppState.dropLocation && AppState.dropLocation.name ? AppState.dropLocation.name : document.getElementById('dropInput').value,
+    distance_km: parseFloat(distance.toFixed(1)),
+    eta_min: Math.ceil(distance*2.5),
+    vehicle: AppState.selectedVehicle || 'mini',
+    fare: totalFare,
+    booked_at: (new Date()).toISOString()
+  };
+  try{ localStorage.setItem('lastBooking', JSON.stringify(bookingPayload)); }catch(e){ console.warn('localStorage write failed', e); }
+
+  // adjust map size if booking panel changed height
+  if (typeof resizeMap === 'function') resizeMap();
+  updateMarkers();
+
+  // navigate to confirmation page (opens in same tab)
+  window.location.href = 'taxi-booking-confirmation.html';
+}
+
+document.getElementById('bookRideBtn').addEventListener('click', handleBookRide);
+
+function closeModal(id){ document.getElementById(id).classList.remove('active'); }
+function showError(msg){ document.getElementById('errorMsg').textContent = msg; document.getElementById('errorModal').classList.add('active'); }
+
+// vehicle selection
+Array.from(document.querySelectorAll('.vehicle-option')).forEach(el=>el.addEventListener('click',e=>{ document.querySelectorAll('.vehicle-option').forEach(x=>x.classList.remove('selected')); e.currentTarget.classList.add('selected'); AppState.selectedVehicle=e.currentTarget.dataset.type; }));
+
+// lightweight toast notification
+function showToast(message, type='info'){
+  const toast = document.createElement('div');
+  toast.textContent = message;
+  toast.style.position = 'fixed';
+  toast.style.left = '50%';
+  toast.style.transform = 'translateX(-50%)';
+  toast.style.bottom = '24px';
+  toast.style.padding = '12px 18px';
+  toast.style.borderRadius = '8px';
+  toast.style.color = '#fff';
+  toast.style.zIndex = 4000;
+  toast.style.fontWeight = '600';
+  toast.style.boxShadow = '0 8px 24px rgba(0,0,0,0.15)';
+  if(type==='success') toast.style.background='#27ae60';
+  else if(type==='warning') toast.style.background='#f39c12';
+  else if(type==='error') toast.style.background='#e74c3c';
+  else toast.style.background='#333';
+  document.body.appendChild(toast);
+  setTimeout(()=>{ toast.style.opacity='0'; toast.style.transition='opacity 300ms'; setTimeout(()=>toast.remove(),300); }, 3000);
+}
+
+// Called when user confirms booking from the modal
+function startRideConfirmed(){
+  // mark as active and disable booking until ride ends
+  AppState.isRideActive = true;
+  document.getElementById('bookRideBtn').disabled = true;
+  document.getElementById('bookRideBtn').textContent = 'Booked';
+
+  // populate and show the full-screen confirmation screen
+  const pickupName = AppState.pickupLocation && AppState.pickupLocation.name ? AppState.pickupLocation.name : document.getElementById('pickupInput').value;
+  const dropName = AppState.dropLocation && AppState.dropLocation.name ? AppState.dropLocation.name : document.getElementById('dropInput').value;
+  const dist = (AppState.lastDistance || 0);
+  const eta = Math.ceil(dist*2.5);
+  const vehicle = AppState.selectedVehicle || 'mini';
+  const fare = AppState.lastFare || 0;
+
+  document.getElementById('confirmPickup').textContent = pickupName;
+  document.getElementById('confirmDrop').textContent = dropName;
+  document.getElementById('confirmDistance').textContent = dist.toFixed(1) + ' km';
+  document.getElementById('confirmETA').textContent = eta + ' min';
+  document.getElementById('confirmVehicle').textContent = vehicle.charAt(0).toUpperCase() + vehicle.slice(1);
+  document.getElementById('confirmFare').textContent = '₹' + fare;
+
+  document.getElementById('confirmedScreen').style.display = 'block';
+  // persist booking details for a separate confirmation page
+  const bookingPayload = {
+    pickup: pickupName,
+    drop: dropName,
+    distance_km: parseFloat(dist.toFixed(1)),
+    eta_min: eta,
+    vehicle: vehicle,
+    fare: fare,
+    booked_at: (new Date()).toISOString()
+  };
+  try{ localStorage.setItem('lastBooking', JSON.stringify(bookingPayload)); }catch(e){ console.warn('localStorage write failed', e); }
+  // navigate to the standalone confirmation page
+  try{ window.location.href = 'taxi-booking-confirmation.html'; }catch(e){ showToast('Booking confirmed! Opened confirmation screen.', 'success'); }
+}
+
+// --- Driver tracking simulation ---
+let _driverMarker = null;
+let _driverInterval = null;
+function lerp(a,b,t){ return a + (b-a)*t; }
+function interpolatePath(from, to, steps){
+  const pts = [];
+  for(let i=0;i<=steps;i++){
+    const t = i/steps;
+    pts.push([ lerp(from[0], to[0], t), lerp(from[1], to[1], t) ]);
+  }
+  return pts;
+}
+
+function startDriverSimulation(){
+  if(!AppState.pickupCoords || !AppState.dropCoords){ showToast('No route to track', 'error'); return; }
+  // If a route polyline exists, use its endpoints; otherwise build straight-line path
+  const pickup = [AppState.pickupCoords.lat, AppState.pickupCoords.lng];
+  const drop = [AppState.dropCoords.lat, AppState.dropCoords.lng];
+  // start driver a short distance away from pickup (offset by small lat/lng)
+  const start = [ pickup[0] + 0.01, pickup[1] + 0.01 ];
+
+  // build path: start -> pickup -> drop
+  const pathToPickup = interpolatePath(start, pickup, 30);
+  const pathToDrop = interpolatePath(pickup, drop, Math.max(40, Math.ceil(calculateDistance(pickup[0],pickup[1],drop[0],drop[1])*8)));
+  const fullPath = pathToPickup.concat(pathToDrop);
+
+  // create or move driver marker
+  if(_driverMarker) map.removeLayer(_driverMarker);
+  _driverMarker = L.marker(start, { title:'Driver', icon: L.divIcon({ className:'driver-icon', html:'🚕', iconSize:[28,28] }) }).addTo(map);
+  let idx = 0;
+  // center map on driver initially
+  map.panTo(fullPath[0]);
+
+  // disable track button while running
+  const viewBtn = document.getElementById('viewTrackingBtn'); if(viewBtn) viewBtn.disabled = true;
+
+  _driverInterval = setInterval(()=>{
+    if(idx >= fullPath.length){
+      clearInterval(_driverInterval); _driverInterval = null;
+      showToast('Driver has completed the trip (demo)', 'success');
+      if(viewBtn) viewBtn.disabled = false;
+      // remove driver marker after short delay
+      setTimeout(()=>{ if(_driverMarker){ map.removeLayer(_driverMarker); _driverMarker = null; } }, 3000);
+      return;
+    }
+    const p = fullPath[idx++];
+    if(_driverMarker) _driverMarker.setLatLng(p);
+    // move map to follow driver every few steps
+    if(idx % 4 === 0) map.panTo(p);
+    // arrival events
+    if(idx === pathToPickup.length){ showToast('Driver arrived at pickup (demo)', 'info'); }
+    if(idx === fullPath.length-1){ showToast('Arriving at drop location (demo)', 'info'); }
+  }, 400);
+}
+
+// Wire modal confirm/cancel buttons
+document.addEventListener('DOMContentLoaded', ()=>{
+  const confirmBtn = document.getElementById('confirmBookingBtn');
+  const cancelBtn = document.getElementById('cancelBookingBtn');
+  if(confirmBtn) confirmBtn.addEventListener('click', ()=>{ closeModal('confirmationModal'); startRideConfirmed(); });
+  if(cancelBtn) cancelBtn.addEventListener('click', ()=>{ closeModal('confirmationModal'); showToast('Booking cancelled', 'warning'); });
+  const closeConfirmed = document.getElementById('closeConfirmedBtn');
+  const viewTracking = document.getElementById('viewTrackingBtn');
+  if(closeConfirmed) closeConfirmed.addEventListener('click', ()=>{ document.getElementById('confirmedScreen').style.display='none'; showToast('Returned to map', 'info'); if(typeof resizeMap==='function') resizeMap(); });
+  if(viewTracking) viewTracking.addEventListener('click', ()=>{ document.getElementById('confirmedScreen').style.display='none'; if(typeof startDriverSimulation==='function'){ startDriverSimulation(); } else { showToast('Tracking started (demo)', 'info'); } if(typeof resizeMap==='function') resizeMap(); });
+});
+
+</script>
+</body>
+</html>
